@@ -193,11 +193,11 @@ def write_petrel_grid(
     # FSLIMI: xmin xmax ymin ymax zmin zmax
     output.write(f"FSLIMI {xmin:.{decimals}f} {xmax:.{decimals}f} {ymin:.{decimals}f} {ymax:.{decimals}f} {zmin:.{decimals}f} {zmax:.{decimals}f}\n")
 
-    # FSNROW: number of rows (repeated)
-    output.write(f"FSNROW {info.height} {info.height}\n")
+    # FSNROW: number of columns (ncols) and rows (nrows)
+    output.write(f"FSNROW {info.width} {info.height}\n")
 
-    # FSXINC: X increment (repeated)
-    output.write(f"FSXINC {info.cell_size_x:.{decimals}f} {info.cell_size_x:.{decimals}f}\n")
+    # FSXINC: X increment and Y increment
+    output.write(f"FSXINC {info.cell_size_x:.{decimals}f} {info.cell_size_y:.{decimals}f}\n")
 
     # Label line (arrow indicates start of data)
     output.write(f"->Converted from {info.path.name}\n")
