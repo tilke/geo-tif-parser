@@ -135,59 +135,89 @@ def write_petrel_grid(
     data: np.ndarray,
     info: GeoTiffInfo,
     output: TextIO,
-    nodata_value: float = -999.25,
+    nodata_value: float = 0.1e31,
     decimals: int = 3,
 ) -> None:
     """Write data as Petrel CPS-3 grid format.
 
     This format is compatible with Petrel's surface import.
-    The CPS-3 format is a ZMAP-compatible grid format.
+    Uses the Petrel-native CPS-3 format with FSASCI header.
+
+    Header format:
+        FSASCI 0 1 "COMPUTED" 0 <nodata>
+        FSATTR 0 0
+        FSLIMI <xmin> <xmax> <ymin> <ymax> <zmin> <zmax>
+        FSNROW <nrows> <nrows>
+        FSXINC <xinc> <xinc>
+        -><label>
+        <data>
 
     Args:
         data: 2D numpy array of Z values
         info: GeoTiffInfo with coordinate information
         output: File-like object to write to
-        nodata_value: Value to use for nodata cells
+        nodata_value: Value to use for nodata cells (default: 0.1E+31)
         decimals: Number of decimal places for values
     """
+    # Make a copy to avoid modifying original
+    data = data.copy()
+
     # Replace nodata values
     if info.nodata is not None:
         mask = (data == info.nodata) | np.isnan(data) | np.isinf(data)
         data = np.where(mask, nodata_value, data)
 
-    # CPS-3 Header
-    # @GRID HEADER
-    output.write("@GRID HEADER\n")
+    # Also handle any remaining NaN/Inf
+    mask = np.isnan(data) | np.isinf(data)
+    data = np.where(mask, nodata_value, data)
 
-    # Grid description line
-    output.write(f"!  Grid converted from: {info.path.name}\n")
-    if info.crs:
-        output.write(f"!  CRS: {info.crs.to_string()}\n")
+    # Calculate Z min/max from valid data
+    valid_data = data[data != nodata_value]
+    if len(valid_data) > 0:
+        zmin = float(np.min(valid_data))
+        zmax = float(np.max(valid_data))
+    else:
+        zmin = 0.0
+        zmax = 0.0
 
-    # Format specification
-    # FSASCI (Field Size ASCII), number of values per line, nodata value
-    values_per_line = 6
-    output.write(f"@ FSASCI,  {values_per_line}, {nodata_value}, , 4, 1\n")
-
-    # Grid dimensions and bounds
-    # rows, cols, xmin, xmax, ymin, ymax
+    # Get bounds
     xmin, ymin, xmax, ymax = info.bounds
-    output.write(f"@ {info.height}, {info.width}, {xmin:.{decimals}f}, {xmax:.{decimals}f}, {ymin:.{decimals}f}, {ymax:.{decimals}f}\n")
 
-    # Cell sizes
-    output.write(f"@ {info.cell_size_x:.{decimals}f}, {info.cell_size_y:.{decimals}f}\n")
+    # Petrel CPS-3 Header
+    # FSASCI: format=0, type=1, name="COMPUTED", unknown=0, nodata
+    output.write(f'FSASCI 0 1 "COMPUTED" 0 0.1E+31\n')
 
-    # End header marker
-    output.write("@\n")
+    # FSATTR: attribute flags
+    output.write("FSATTR 0 0\n")
+
+    # FSLIMI: xmin xmax ymin ymax zmin zmax
+    output.write(f"FSLIMI {xmin:.{decimals}f} {xmax:.{decimals}f} {ymin:.{decimals}f} {ymax:.{decimals}f} {zmin:.{decimals}f} {zmax:.{decimals}f}\n")
+
+    # FSNROW: number of rows (repeated)
+    output.write(f"FSNROW {info.height} {info.height}\n")
+
+    # FSXINC: X increment (repeated)
+    output.write(f"FSXINC {info.cell_size_x:.{decimals}f} {info.cell_size_x:.{decimals}f}\n")
+
+    # Label line (arrow indicates start of data)
+    output.write(f"->Converted from {info.path.name}\n")
 
     # Write data (row by row, from top to bottom)
-    # Petrel expects values in column-major order for CPS-3
+    # Petrel expects 5 values per line
+    values_per_line = 5
+
     for row in range(info.height):
         row_data = data[row, :]
-        # Write values_per_line values per line
         for i in range(0, len(row_data), values_per_line):
             chunk = row_data[i : i + values_per_line]
-            line = " ".join(f"{v:.{decimals}f}" for v in chunk)
+            # Format with appropriate precision, using scientific notation for nodata
+            formatted = []
+            for v in chunk:
+                if v == nodata_value or v >= 1e30:
+                    formatted.append("0.1E+31")
+                else:
+                    formatted.append(f"{v:.{decimals}f}")
+            line = "  ".join(formatted)
             output.write(line + "\n")
 
 
