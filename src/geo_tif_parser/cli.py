@@ -234,6 +234,13 @@ def convert(
             max=10,
         ),
     ] = 3,
+    flip_z: Annotated[
+        bool,
+        typer.Option(
+            "--flip-z",
+            help="Negate Z values (convert elevation to depth or vice versa)",
+        ),
+    ] = False,
 ) -> None:
     """Convert a GeoTIFF file to ASCII format for Petrel import."""
     # Determine output path
@@ -247,6 +254,8 @@ def convert(
 
     console.print(f"[cyan]Converting:[/cyan] {input_file.name}")
     console.print(f"[cyan]Format:[/cyan] {format.value}")
+    if flip_z:
+        console.print(f"[cyan]Flip Z:[/cyan] Yes (negating Z values)")
     console.print(f"[cyan]Output:[/cyan] {output_file}")
 
     try:
@@ -258,6 +267,7 @@ def convert(
                 nodata_value=nodata,
                 skip_nodata=skip_nodata,
                 decimals=decimals,
+                flip_z=flip_z,
             )
 
         console.print("[green]✓ Conversion complete![/green]")
@@ -332,6 +342,13 @@ def batch(
             max=10,
         ),
     ] = 3,
+    flip_z: Annotated[
+        bool,
+        typer.Option(
+            "--flip-z",
+            help="Negate Z values (convert elevation to depth or vice versa)",
+        ),
+    ] = False,
 ) -> None:
     """Batch convert multiple GeoTIFF files in a directory."""
     # Set output directory
@@ -348,6 +365,8 @@ def batch(
         raise typer.Exit(0)
 
     console.print(f"[cyan]Found {len(input_files)} files to convert[/cyan]")
+    if flip_z:
+        console.print(f"[cyan]Flip Z:[/cyan] Yes (negating Z values)")
 
     suffix_map = {
         OutputFormat.PETREL_POINTS: ".xyz",
@@ -367,6 +386,7 @@ def batch(
                 input_path=input_file,
                 output_path=output_file,
                 output_format=format,
+                flip_z=flip_z,
                 nodata_value=nodata,
                 skip_nodata=skip_nodata,
                 decimals=decimals,

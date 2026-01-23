@@ -281,6 +281,7 @@ def convert_geotiff(
     nodata_value: float | None = None,
     skip_nodata: bool = True,
     decimals: int = 3,
+    flip_z: bool = False,
 ) -> dict:
     """Convert a GeoTIFF file to ASCII format.
 
@@ -291,11 +292,21 @@ def convert_geotiff(
         nodata_value: Custom nodata value for output
         skip_nodata: Skip nodata values (points format only)
         decimals: Decimal precision for output
+        flip_z: If True, negate Z values (convert elevation to depth or vice versa)
 
     Returns:
         Dictionary with conversion statistics
     """
     data, info = read_geotiff_data(input_path)
+
+    # Flip Z values if requested (negate non-nodata values)
+    if flip_z:
+        if info.nodata is not None:
+            mask = (data != info.nodata) & ~np.isnan(data) & ~np.isinf(data)
+            data = np.where(mask, -data, data)
+        else:
+            mask = ~np.isnan(data) & ~np.isinf(data)
+            data = np.where(mask, -data, data)
 
     stats = {
         "input_file": str(input_path),
