@@ -75,7 +75,7 @@ Coordinate system: NAD83 / Washington South (Lambert Conformal Conic), units in 
 - Dataclasses for structured data
 - Enum for output format options
 - Rich console output for user feedback
-- NoData handling: skip by default for points, replace with -999.25 for grids
+- NoData handling: skip by default for points, replace with 0.1E+31 for grids (Petrel standard)
 
 ## Common Tasks
 
@@ -90,3 +90,17 @@ Coordinate system: NAD83 / Washington South (Lambert Conformal Conic), units in 
 ### Modifying CLI options
 
 All CLI code is in `cli.py`. Uses Typer's `Annotated` syntax for option definitions with full type hints.
+
+## Petrel CPS-3 Format Reference
+
+The `petrel_grid` format uses Petrel's native CPS-3 header structure:
+
+```
+FSASCI 0 1 "COMPUTED" 0 0.1E+31    # Format type, name, nodata value
+FSATTR 0 0                          # Attribute flags
+FSLIMI xmin xmax ymin ymax zmin zmax  # Spatial limits
+FSNROW ncols nrows                  # Grid dimensions (columns, rows)
+FSXINC dx dy                        # Cell increments (X, Y)
+->Label                             # Data section marker
+<values>                            # 5 values per line, space-separated
+```

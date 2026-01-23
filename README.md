@@ -31,7 +31,7 @@ sudo apt-get install gdal-bin libgdal-dev
 ### Install from source
 
 ```bash
-git clone https://github.com/yourusername/geo-tif-parser.git
+git clone https://github.com/tilke/geo-tif-parser.git
 cd geo-tif-parser
 python3 -m venv .venv
 source .venv/bin/activate
@@ -118,21 +118,20 @@ Space-delimited X Y Z points, one per line. This is the default format.
 
 ### Petrel Grid (`petrel_grid`)
 
-CPS-3 format (ZMAP-compatible) preserving the full grid structure.
+Petrel-native CPS-3 format preserving the full grid structure.
 
 - **Extension**: `.cps3`
 - **Petrel Import**: Import directly as CPS-3 Grid Surface
-- **NoData Handling**: Replaced with -999.25 (configurable)
+- **NoData Handling**: Replaced with 0.1E+31 (Petrel standard)
 
 ```
-@GRID HEADER
-!  Grid converted from: surface.tif
-!  CRS: NAD83 / Washington South
-@ FSASCI,  6, -999.25, , 4, 1
-@ 2958, 3151, 1313631.621, 2889131.621, -353360.766, 1125639.234
-@ 500.000, 500.000
-@
-2567.263 2593.142 2556.512 2654.270 2579.251 2693.157
+FSASCI 0 1 "COMPUTED" 0 0.1E+31
+FSATTR 0 0
+FSLIMI 1313631.621 2889131.621 -353360.766 1125639.234 -2293.685 9063.338
+FSNROW 3151 2958
+FSXINC 500.000 500.000
+->Converted from surface.tif
+2567.263  2593.142  2556.512  2654.270  2579.251
 ```
 
 ### ESRI ASCII Grid (`esri_ascii`)
@@ -235,7 +234,7 @@ Options:
 
 ```bash
 # Clone and setup
-git clone https://github.com/yourusername/geo-tif-parser.git
+git clone https://github.com/tilke/geo-tif-parser.git
 cd geo-tif-parser
 python3 -m venv .venv
 source .venv/bin/activate
