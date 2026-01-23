@@ -1,0 +1,36 @@
+[project]
+name = "geo-tif-parser"
+version = "0.1.0"
+description = "CLI tool to convert GeoTIFF files to Petrel ASCII surface format"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    {name = "Peter Tilke", email = "tilke@alum.mit.edu"}
+]
+dependencies = [
+    "rasterio>=1.3.0",
+    "numpy>=1.24.0",
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.scripts]
+geotif = "geo_tif_parser.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/geo_tif_parser"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+]
