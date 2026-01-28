@@ -91,16 +91,19 @@ Coordinate system: NAD83 / Washington South (Lambert Conformal Conic), units in 
 
 All CLI code is in `cli.py`. Uses Typer's `Annotated` syntax for option definitions with full type hints.
 
-## Petrel CPS-3 Format Reference
+## ZMAP+ Grid Format Reference
 
-The `petrel_grid` format uses Petrel's native CPS-3 header structure:
+The `petrel_grid` format uses standard ZMAP+ ASCII grid format (imported as CPS-3 grid in Petrel):
 
 ```
-FSASCI 0 1 "COMPUTED" 0 0.1E+31    # Format type, name, nodata value
-FSATTR 0 0                          # Attribute flags
-FSLIMI xmin xmax ymin ymax zmin zmax  # Spatial limits
-FSNROW ncols nrows                  # Grid dimensions (columns, rows)
-FSXINC dx dy                        # Cell increments (X, Y)
-->Label                             # Data section marker
-<values>                            # 5 values per line, space-separated
+! <comment>                                         # Comment line
+@<name>, GRID, <nodes_per_line>                     # Grid identifier
+<field_width>, <null_value>, , <decimals>, <start>  # Format spec
+<nrows>, <ncols>, <xmin>, <xmax>, <ymin>, <ymax>   # Grid dimensions & bounds
+0.0, 0.0, 0.0                                      # Rotation (unused)
+@                                                   # End of header
+<values>                                            # Column-major, N→S per column, W→E
 ```
+
+Data is written column-by-column (column-major order), starting from the upper-left (NW)
+corner, going down each column (N→S), then advancing columns left to right (W→E).

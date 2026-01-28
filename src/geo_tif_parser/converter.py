@@ -8,6 +8,55 @@ from typing import TextIO
 import numpy as np
 import rasterio
 from rasterio.crs import CRS
+from rasterio.warp import (
+    Resampling,
+    calculate_default_transform,
+    reproject,
+    transform,
+    transform_bounds,
+)
+
+
+# Mapping of resampling method names to Resampling enum values
+RESAMPLING_METHODS = {
+    "nearest": Resampling.nearest,
+    "bilinear": Resampling.bilinear,
+    "cubic": Resampling.cubic,
+    "lanczos": Resampling.lanczos,
+}
+
+
+def parse_crs(crs_string: str) -> CRS:
+    """Parse CRS from EPSG code (26910), EPSG:26910, or proj4 string.
+
+    Args:
+        crs_string: CRS specification string
+
+    Returns:
+        Parsed CRS object
+
+    Raises:
+        ValueError: If CRS cannot be parsed
+    """
+    crs_string = crs_string.strip()
+
+    # Try numeric EPSG code first (e.g., "26910")
+    if crs_string.isdigit():
+        return CRS.from_epsg(int(crs_string))
+
+    # Try EPSG:XXXXX format (e.g., "EPSG:26910")
+    if crs_string.upper().startswith("EPSG:"):
+        try:
+            epsg_code = int(crs_string.split(":")[1])
+            return CRS.from_epsg(epsg_code)
+        except (ValueError, IndexError) as e:
+            raise ValueError(f"Invalid EPSG format: {crs_string}") from e
+
+    # Try as generic CRS string (WKT, proj4, etc.)
+    try:
+        return CRS.from_string(crs_string)
+    except Exception as e:
+        raise ValueError(f"Cannot parse CRS: {crs_string}") from e
 
 
 class OutputFormat(str, Enum):
@@ -76,6 +125,72 @@ def read_geotiff_data(tif_path: Path) -> tuple[np.ndarray, GeoTiffInfo]:
     return data, info
 
 
+def reproject_raster(
+    data: np.ndarray,
+    info: GeoTiffInfo,
+    dst_crs: CRS,
+    resampling: Resampling = Resampling.bilinear,
+) -> tuple[np.ndarray, GeoTiffInfo]:
+    """Reproject raster data to a new CRS.
+
+    Args:
+        data: 2D numpy array of values
+        info: GeoTiffInfo with source coordinate information
+        dst_crs: Destination CRS
+        resampling: Resampling method (default: bilinear)
+
+    Returns:
+        Tuple of (reprojected data array, updated GeoTiffInfo)
+    """
+    # Calculate the transform and dimensions for the destination CRS
+    dst_transform, dst_width, dst_height = calculate_default_transform(
+        info.crs,
+        dst_crs,
+        info.width,
+        info.height,
+        *info.bounds,
+    )
+
+    # Create destination array
+    dst_data = np.zeros((dst_height, dst_width), dtype=data.dtype)
+
+    # Perform the reprojection
+    reproject(
+        source=data,
+        destination=dst_data,
+        src_transform=info.transform,
+        src_crs=info.crs,
+        dst_transform=dst_transform,
+        dst_crs=dst_crs,
+        resampling=resampling,
+        src_nodata=info.nodata,
+        dst_nodata=info.nodata,
+    )
+
+    # Calculate new bounds from the transform and dimensions
+    dst_bounds = (
+        dst_transform.c,  # left (xmin)
+        dst_transform.f + dst_height * dst_transform.e,  # bottom (ymin)
+        dst_transform.c + dst_width * dst_transform.a,  # right (xmax)
+        dst_transform.f,  # top (ymax)
+    )
+
+    # Create updated GeoTiffInfo
+    new_info = GeoTiffInfo(
+        path=info.path,
+        width=dst_width,
+        height=dst_height,
+        crs=dst_crs,
+        transform=dst_transform,
+        nodata=info.nodata,
+        dtype=info.dtype,
+        bounds=dst_bounds,
+        pixel_size=(dst_transform.a, dst_transform.e),
+    )
+
+    return dst_data, new_info
+
+
 def write_petrel_points(
     data: np.ndarray,
     info: GeoTiffInfo,
@@ -83,6 +198,7 @@ def write_petrel_points(
     nodata_value: float | None = None,
     skip_nodata: bool = True,
     decimals: int = 3,
+    dst_crs: CRS | None = None,
 ) -> int:
     """Write data as Petrel-compatible XYZ points.
 
@@ -95,6 +211,7 @@ def write_petrel_points(
         nodata_value: Value to use for nodata in output (None = skip nodata)
         skip_nodata: If True, skip nodata points entirely
         decimals: Number of decimal places for coordinates
+        dst_crs: Optional destination CRS for coordinate transformation
 
     Returns:
         Number of points written
@@ -107,6 +224,11 @@ def write_petrel_points(
     y_origin = info.transform.f
     cell_x = info.transform.a
     cell_y = info.transform.e  # Negative for north-up images
+
+    # Collect all valid points first for batch transformation
+    xs = []
+    ys = []
+    zs = []
 
     for row in range(info.height):
         for col in range(info.width):
@@ -125,8 +247,20 @@ def write_petrel_points(
             x = x_origin + (col + 0.5) * cell_x
             y = y_origin + (row + 0.5) * cell_y
 
-            output.write(f"{x:.{decimals}f} {y:.{decimals}f} {z:.{decimals}f}\n")
-            count += 1
+            xs.append(x)
+            ys.append(y)
+            zs.append(z)
+
+    # Transform coordinates if dst_crs is specified
+    if dst_crs is not None and info.crs is not None:
+        xs_out, ys_out = transform(info.crs, dst_crs, xs, ys)
+    else:
+        xs_out, ys_out = xs, ys
+
+    # Write points
+    for x, y, z in zip(xs_out, ys_out, zs):
+        output.write(f"{x:.{decimals}f} {y:.{decimals}f} {z:.{decimals}f}\n")
+        count += 1
 
     return count
 
@@ -137,20 +271,22 @@ def write_petrel_grid(
     output: TextIO,
     nodata_value: float = 0.1e31,
     decimals: int = 3,
+    flip_z: bool = False,
+    dst_crs: CRS | None = None,
 ) -> None:
-    """Write data as Petrel CPS-3 grid format.
+    """Write data as ZMAP+ ASCII grid format.
 
-    This format is compatible with Petrel's surface import.
-    Uses the Petrel-native CPS-3 format with FSASCI header.
+    This format is compatible with Petrel's CPS-3 grid surface import.
+    Uses the standard ZMAP+ header with @ delimiters.
 
     Header format:
-        FSASCI 0 1 "COMPUTED" 0 <nodata>
-        FSATTR 0 0
-        FSLIMI <xmin> <xmax> <ymin> <ymax> <zmin> <zmax>
-        FSNROW <nrows> <nrows>
-        FSXINC <xinc> <xinc>
-        -><label>
-        <data>
+        ! <comment>
+        @<name>, GRID, <nodes_per_line>
+        <field_width>, <null_value>, , <decimal_places>, <start_col>
+        <nrows>, <ncols>, <xmin>, <xmax>, <ymin>, <ymax>
+        0.0, 0.0, 0.0
+        @
+        <data: column-major, N→S per column, columns W→E>
 
     Args:
         data: 2D numpy array of Z values
@@ -158,6 +294,8 @@ def write_petrel_grid(
         output: File-like object to write to
         nodata_value: Value to use for nodata cells (default: 0.1E+31)
         decimals: Number of decimal places for values
+        flip_z: If True, indicates Z values were negated (for label comment)
+        dst_crs: Optional destination CRS for coordinate transformation (bounds-only)
     """
     # Make a copy to avoid modifying original
     data = data.copy()
@@ -180,45 +318,54 @@ def write_petrel_grid(
         zmin = 0.0
         zmax = 0.0
 
-    # Get bounds
+    # Get bounds and transform if dst_crs specified
     xmin, ymin, xmax, ymax = info.bounds
+    cell_size_x = info.cell_size_x
+    cell_size_y = info.cell_size_y
 
-    # Petrel CPS-3 Header
-    # FSASCI: format=0, type=1, name="COMPUTED", unknown=0, nodata
-    output.write(f'FSASCI 0 1 "COMPUTED" 0 0.1E+31\n')
+    if dst_crs is not None and info.crs is not None:
+        # Transform bounds to destination CRS
+        xmin, ymin, xmax, ymax = transform_bounds(
+            info.crs, dst_crs, xmin, ymin, xmax, ymax
+        )
+        # Recalculate cell sizes for transformed bounds
+        cell_size_x = (xmax - xmin) / info.width
+        cell_size_y = (ymax - ymin) / info.height
 
-    # FSATTR: attribute flags
-    output.write("FSATTR 0 0\n")
+    # ZMAP+ Header
+    nodes_per_line = 5
+    field_width = 15
 
-    # FSLIMI: xmin xmax ymin ymax zmin zmax
-    output.write(f"FSLIMI {xmin:.{decimals}f} {xmax:.{decimals}f} {ymin:.{decimals}f} {ymax:.{decimals}f} {zmin:.{decimals}f} {zmax:.{decimals}f}\n")
+    # Comment line
+    if flip_z:
+        output.write(f"! Converted from {info.path.name} | Z: Depth (positive down)\n")
+    else:
+        output.write(f"! Converted from {info.path.name} | Z: Elevation (positive up)\n")
 
-    # FSNROW: number of columns (ncols) and rows (nrows)
-    output.write(f"FSNROW {info.width} {info.height}\n")
+    # Grid definition header (between @ markers)
+    output.write(f"@{info.path.stem}, GRID, {nodes_per_line}\n")
+    output.write(f"{field_width}, 0.1000000E+31, , {decimals}, 1\n")
+    output.write(
+        f"{info.height}, {info.width}, "
+        f"{xmin:.{decimals}f}, {xmax:.{decimals}f}, "
+        f"{ymin:.{decimals}f}, {ymax:.{decimals}f}\n"
+    )
+    output.write("0.0, 0.0, 0.0\n")
+    output.write("@\n")
 
-    # FSXINC: X increment and Y increment
-    output.write(f"FSXINC {info.cell_size_x:.{decimals}f} {info.cell_size_y:.{decimals}f}\n")
-
-    # Label line (arrow indicates start of data)
-    output.write(f"->Converted from {info.path.name}\n")
-
-    # Write data (row by row, from top to bottom)
-    # Petrel expects 5 values per line
-    values_per_line = 5
-
-    for row in range(info.height):
-        row_data = data[row, :]
-        for i in range(0, len(row_data), values_per_line):
-            chunk = row_data[i : i + values_per_line]
-            # Format with appropriate precision, using scientific notation for nodata
+    # Write data column by column (ZMAP+ column-major order)
+    # Each column: N→S (top to bottom of raster), columns: W→E (left to right)
+    for col in range(info.width):
+        col_data = data[:, col]  # top to bottom (N→S)
+        for i in range(0, len(col_data), nodes_per_line):
+            chunk = col_data[i : i + nodes_per_line]
             formatted = []
             for v in chunk:
                 if v == nodata_value or v >= 1e30:
-                    formatted.append("0.1E+31")
+                    formatted.append(f"{'0.1000000E+31':>{field_width}}")
                 else:
-                    formatted.append(f"{v:.{decimals}f}")
-            line = "  ".join(formatted)
-            output.write(line + "\n")
+                    formatted.append(f"{v:{field_width}.{decimals}f}")
+            output.write("".join(formatted) + "\n")
 
 
 def write_esri_ascii(
@@ -227,6 +374,7 @@ def write_esri_ascii(
     output: TextIO,
     nodata_value: float = -9999,
     decimals: int = 3,
+    dst_crs: CRS | None = None,
 ) -> None:
     """Write data as ESRI ASCII Grid format.
 
@@ -238,6 +386,7 @@ def write_esri_ascii(
         output: File-like object to write to
         nodata_value: Value to use for nodata cells
         decimals: Number of decimal places for values
+        dst_crs: Optional destination CRS for coordinate transformation (bounds-only)
     """
     # Replace nodata values
     if info.nodata is not None:
@@ -248,14 +397,27 @@ def write_esri_ascii(
     # Note: xllcorner/yllcorner are lower-left corner coordinates
     xll = info.bounds[0]
     yll = info.bounds[1]
+    xur = info.bounds[2]
+    yur = info.bounds[3]
+    cell_size_x = info.cell_size_x
+    cell_size_y = info.cell_size_y
+
+    # Transform bounds if dst_crs specified
+    if dst_crs is not None and info.crs is not None:
+        xll, yll, xur, yur = transform_bounds(
+            info.crs, dst_crs, xll, yll, xur, yur
+        )
+        # Recalculate cell sizes for transformed bounds
+        cell_size_x = (xur - xll) / info.width
+        cell_size_y = (yur - yll) / info.height
 
     # Check if cells are square
-    if abs(info.cell_size_x - info.cell_size_y) < 1e-6:
+    if abs(cell_size_x - cell_size_y) < 1e-6:
         output.write(f"ncols         {info.width}\n")
         output.write(f"nrows         {info.height}\n")
         output.write(f"xllcorner     {xll:.{decimals}f}\n")
         output.write(f"yllcorner     {yll:.{decimals}f}\n")
-        output.write(f"cellsize      {info.cell_size_x:.{decimals}f}\n")
+        output.write(f"cellsize      {cell_size_x:.{decimals}f}\n")
         output.write(f"NODATA_value  {nodata_value}\n")
     else:
         # Use dx/dy for non-square cells (ArcGIS extension)
@@ -263,8 +425,8 @@ def write_esri_ascii(
         output.write(f"nrows         {info.height}\n")
         output.write(f"xllcorner     {xll:.{decimals}f}\n")
         output.write(f"yllcorner     {yll:.{decimals}f}\n")
-        output.write(f"dx            {info.cell_size_x:.{decimals}f}\n")
-        output.write(f"dy            {info.cell_size_y:.{decimals}f}\n")
+        output.write(f"dx            {cell_size_x:.{decimals}f}\n")
+        output.write(f"dy            {cell_size_y:.{decimals}f}\n")
         output.write(f"NODATA_value  {nodata_value}\n")
 
     # Write data (row by row, from top to bottom)
@@ -282,6 +444,9 @@ def convert_geotiff(
     skip_nodata: bool = True,
     decimals: int = 3,
     flip_z: bool = False,
+    output_crs: str | None = None,
+    reproject_mode: str = "bounds-only",
+    resampling: str = "bilinear",
 ) -> dict:
     """Convert a GeoTIFF file to ASCII format.
 
@@ -293,11 +458,34 @@ def convert_geotiff(
         skip_nodata: Skip nodata values (points format only)
         decimals: Decimal precision for output
         flip_z: If True, negate Z values (convert elevation to depth or vice versa)
+        output_crs: Output CRS (e.g., "26910", "EPSG:26910"). If None, use source CRS
+        reproject_mode: "bounds-only" (transform coordinates only) or "full" (reproject raster)
+        resampling: Resampling method for full mode ("nearest", "bilinear", "cubic", "lanczos")
 
     Returns:
         Dictionary with conversion statistics
     """
     data, info = read_geotiff_data(input_path)
+
+    # Parse and validate output CRS
+    dst_crs = None
+    if output_crs is not None:
+        if info.crs is None:
+            raise ValueError(
+                f"Cannot transform coordinates: source file '{input_path.name}' has no CRS defined"
+            )
+        dst_crs = parse_crs(output_crs)
+
+        # Check if source and destination CRS are the same
+        if info.crs == dst_crs:
+            dst_crs = None  # No transformation needed
+
+    # Handle full reprojection mode
+    if dst_crs is not None and reproject_mode == "full":
+        resampling_method = RESAMPLING_METHODS.get(resampling, Resampling.bilinear)
+        data, info = reproject_raster(data, info, dst_crs, resampling_method)
+        # After full reprojection, no need for bounds-only transform
+        dst_crs = None
 
     # Flip Z values if requested (negate non-nodata values)
     if flip_z:
@@ -317,6 +505,11 @@ def convert_geotiff(
         "total_cells": info.width * info.height,
     }
 
+    # Include CRS info in stats
+    if output_crs is not None:
+        stats["output_crs"] = output_crs
+        stats["reproject_mode"] = reproject_mode
+
     with open(output_path, "w") as f:
         if output_format == OutputFormat.PETREL_POINTS:
             default_nodata = None if skip_nodata else -999.25
@@ -327,6 +520,7 @@ def convert_geotiff(
                 nodata_value=nodata_value or default_nodata,
                 skip_nodata=skip_nodata,
                 decimals=decimals,
+                dst_crs=dst_crs,
             )
             stats["points_written"] = count
         elif output_format == OutputFormat.PETREL_GRID:
@@ -334,8 +528,10 @@ def convert_geotiff(
                 data,
                 info,
                 f,
-                nodata_value=nodata_value or -999.25,
+                nodata_value=nodata_value or 0.1e31,
                 decimals=decimals,
+                flip_z=flip_z,
+                dst_crs=dst_crs,
             )
         elif output_format == OutputFormat.ESRI_ASCII:
             write_esri_ascii(
@@ -344,6 +540,7 @@ def convert_geotiff(
                 f,
                 nodata_value=nodata_value or -9999,
                 decimals=decimals,
+                dst_crs=dst_crs,
             )
 
     return stats

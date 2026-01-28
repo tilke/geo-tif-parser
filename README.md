@@ -6,6 +6,8 @@ A Python CLI tool for converting GeoTIFF raster files to ASCII formats compatibl
 
 - Convert GeoTIFF files to multiple ASCII formats
 - Batch processing of entire directories
+- **CRS transformation**: Transform coordinates to a different CRS (e.g., UTM)
+- Two reprojection modes: fast bounds-only or full raster reprojection
 - Preserves coordinate reference system information
 - Configurable NoData handling
 - Adjustable decimal precision
@@ -83,6 +85,18 @@ geotif convert input.tif --decimals 2
 
 # Include NoData values instead of skipping them
 geotif convert input.tif --include-nodata --nodata -9999
+
+# Flip Z values (convert elevation to depth, positive down)
+geotif convert input.tif -f petrel_grid --flip-z
+
+# Transform coordinates to UTM Zone 10N (bounds-only mode, fast)
+geotif convert input.tif -f petrel_grid --output-crs 26910
+
+# Full reprojection with bilinear resampling
+geotif convert input.tif -f petrel_grid --output-crs 26910 --reproject-mode full
+
+# Full reprojection with cubic resampling
+geotif convert input.tif -f petrel_points --output-crs EPSG:26910 --reproject-mode full --resampling cubic
 ```
 
 ### Batch Convert Multiple Files
@@ -98,6 +112,24 @@ geotif batch /path/to/geotiffs/ -o /path/to/output/ -f petrel_grid
 
 # Use custom file pattern
 geotif batch /path/to/geotiffs/ --pattern "surface_*.tif"
+
+# Batch convert with Z flipped to depth
+geotif batch /path/to/geotiffs/ -f petrel_grid --flip-z
+
+# Batch convert with CRS transformation
+geotif batch /path/to/geotiffs/ -f petrel_grid --output-crs 26910
+```
+
+### Display Detailed Header Information
+
+View detailed CRS and grid information, optionally with transformed bounds:
+
+```bash
+# Show detailed header info
+geotif header input.tif
+
+# Preview transformed bounds in a different CRS
+geotif header input.tif --output-crs 26910
 ```
 
 ## Output Formats
@@ -130,9 +162,11 @@ FSATTR 0 0
 FSLIMI 1313631.621 2889131.621 -353360.766 1125639.234 -2293.685 9063.338
 FSNROW 3151 2958
 FSXINC 500.000 500.000
-->Converted from surface.tif
+->Converted from surface.tif | Z: Elevation (positive up)
 2567.263  2593.142  2556.512  2654.270  2579.251
 ```
+
+The header label indicates whether Z values represent elevation (positive up) or depth (positive down, when using `--flip-z`).
 
 ### ESRI ASCII Grid (`esri_ascii`)
 
@@ -152,6 +186,44 @@ NODATA_value  -9999
 2567.263 2593.142 2556.512 ...
 ```
 
+## CRS Transformation
+
+Transform output coordinates to a different Coordinate Reference System (CRS) using the `--output-crs` option. This is useful when your GeoTIFF is in one CRS (e.g., NAD83 State Plane) but you need to import into Petrel using a different CRS (e.g., UTM).
+
+### CRS Specification
+
+The `--output-crs` option accepts:
+- **EPSG code as number**: `26910` (UTM Zone 10N)
+- **EPSG code with prefix**: `EPSG:26910`
+- **Proj4 string**: `+proj=utm +zone=10 +datum=NAD83`
+
+### Reprojection Modes
+
+| Mode | Description | Best For |
+|------|-------------|----------|
+| `bounds-only` (default) | Transform bounds/coordinates only, preserves original pixel data | Fast, minor projection changes |
+| `full` | Reproject entire raster with resampling | Major projection changes, accurate results |
+
+**bounds-only** mode transforms coordinate values but keeps the original pixel data unchanged. This is fast and works well when the source and destination CRS are similar (e.g., both projected coordinate systems).
+
+**full** mode reprojects the entire raster, resampling pixel values to the new grid. This is more accurate for major projection changes but slower. Available resampling methods: `nearest`, `bilinear` (default), `cubic`, `lanczos`.
+
+### Examples
+
+```bash
+# Preview transformed bounds before converting
+geotif header surface.tif --output-crs 26910
+
+# Convert State Plane (US Survey Feet) to UTM (meters)
+geotif convert surface.tif -f petrel_grid --output-crs 26910
+
+# Full reprojection for maximum accuracy
+geotif convert surface.tif -f petrel_grid --output-crs 26910 --reproject-mode full --resampling cubic
+
+# Batch convert directory with CRS transformation
+geotif batch /data/surfaces/ -f petrel_grid --output-crs EPSG:26910
+```
+
 ## Command Reference
 
 ### `geotif info`
@@ -163,6 +235,20 @@ Usage: geotif info [OPTIONS] INPUT_FILE
 
 Arguments:
   INPUT_FILE  Path to GeoTIFF file [required]
+```
+
+### `geotif header`
+
+```
+Usage: geotif header [OPTIONS] INPUT_FILE
+
+  Display detailed header information including CRS for Petrel import.
+
+Arguments:
+  INPUT_FILE                      Path to GeoTIFF file [required]
+
+Options:
+  -c, --output-crs TEXT           Preview transformed bounds in this CRS (e.g., 26910, EPSG:26910)
 ```
 
 ### `geotif convert`
@@ -183,6 +269,10 @@ Options:
   --skip-nodata / --include-nodata
                                   Skip or include nodata values [default: skip-nodata]
   -d, --decimals INTEGER          Number of decimal places (0-10) [default: 3]
+  --flip-z                        Negate Z values (convert elevation to depth or vice versa)
+  -c, --output-crs TEXT           Output CRS for coordinate transformation (e.g., 26910, EPSG:26910)
+  --reproject-mode TEXT           Reprojection mode: 'bounds-only' (fast, default) or 'full'
+  --resampling TEXT               Resampling method for full mode: nearest, bilinear, cubic, lanczos
 ```
 
 ### `geotif batch`
@@ -204,6 +294,10 @@ Options:
   --skip-nodata / --include-nodata
                                   Skip or include nodata values [default: skip-nodata]
   -d, --decimals INTEGER          Number of decimal places (0-10) [default: 3]
+  --flip-z                        Negate Z values (convert elevation to depth or vice versa)
+  -c, --output-crs TEXT           Output CRS for coordinate transformation (e.g., 26910, EPSG:26910)
+  --reproject-mode TEXT           Reprojection mode: 'bounds-only' (fast, default) or 'full'
+  --resampling TEXT               Resampling method for full mode: nearest, bilinear, cubic, lanczos
 ```
 
 ## Importing into Petrel

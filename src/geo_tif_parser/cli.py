@@ -10,10 +10,13 @@ from rich.table import Table
 import numpy as np
 import rasterio
 
+from rasterio.warp import transform_bounds
+
 from .converter import (
     OutputFormat,
     convert_geotiff,
     get_geotiff_info,
+    parse_crs,
 )
 
 app = typer.Typer(
@@ -77,6 +80,14 @@ def header(
             readable=True,
         ),
     ],
+    output_crs: Annotated[
+        Optional[str],
+        typer.Option(
+            "--output-crs",
+            "-c",
+            help="Preview transformed bounds in this CRS (e.g., 26910, EPSG:26910)",
+        ),
+    ] = None,
 ) -> None:
     """Display detailed header information including CRS for Petrel import."""
     try:
@@ -166,15 +177,76 @@ def header(
 
         console.print(table)
 
-        # CPS-3 Header Preview
-        console.print("\n[bold cyan]CPS-3 Header Preview[/bold cyan]")
+        # Show transformed bounds if output_crs specified
+        if output_crs is not None:
+            if tif_info.crs is None:
+                console.print("\n[yellow]Cannot transform bounds: source file has no CRS defined[/yellow]")
+            else:
+                try:
+                    dst_crs = parse_crs(output_crs)
+                    xmin, ymin, xmax, ymax = transform_bounds(
+                        tif_info.crs, dst_crs, bounds[0], bounds[1], bounds[2], bounds[3]
+                    )
+                    cell_size_x = (xmax - xmin) / tif_info.width
+                    cell_size_y = (ymax - ymin) / tif_info.height
+
+                    console.print(f"\n[bold cyan]Transformed Bounds ({output_crs})[/bold cyan]")
+                    console.print("─" * 60)
+
+                    # Get destination CRS info
+                    dst_epsg = dst_crs.to_epsg()
+                    dst_name = dst_crs.name if hasattr(dst_crs, 'name') else None
+                    if dst_name:
+                        console.print(f"[green]Target CRS:[/green] {dst_name}")
+                    if dst_epsg:
+                        console.print(f"[green]Target EPSG:[/green] {dst_epsg}")
+                    if dst_crs.linear_units:
+                        console.print(f"[green]Target Units:[/green] {dst_crs.linear_units}")
+
+                    trans_table = Table(show_header=False, box=None)
+                    trans_table.add_column("Property", style="green", width=20)
+                    trans_table.add_column("Value")
+                    trans_table.add_row("X Min", f"{xmin:.6f}")
+                    trans_table.add_row("X Max", f"{xmax:.6f}")
+                    trans_table.add_row("Y Min", f"{ymin:.6f}")
+                    trans_table.add_row("Y Max", f"{ymax:.6f}")
+                    trans_table.add_row("Cell Size X", f"{cell_size_x:.6f}")
+                    trans_table.add_row("Cell Size Y", f"{cell_size_y:.6f}")
+                    console.print(trans_table)
+                except Exception as e:
+                    console.print(f"\n[red]Error transforming bounds: {e}[/red]")
+
+        # ZMAP+ Header Preview
+        console.print("\n[bold cyan]ZMAP+ Header Preview[/bold cyan]")
         console.print("─" * 60)
-        console.print(f'FSASCI 0 1 "COMPUTED" 0 0.1E+31')
-        console.print(f"FSATTR 0 0")
-        console.print(f"FSLIMI {bounds[0]:.3f} {bounds[2]:.3f} {bounds[1]:.3f} {bounds[3]:.3f} {zmin:.3f} {zmax:.3f}")
-        console.print(f"FSNROW {tif_info.width} {tif_info.height}")
-        console.print(f"FSXINC {tif_info.cell_size_x:.3f} {tif_info.cell_size_y:.3f}")
-        console.print(f"->Converted from {input_file.name}")
+
+        # Use transformed bounds for preview if output_crs specified
+        preview_bounds = bounds
+        preview_cell_x = tif_info.cell_size_x
+        preview_cell_y = tif_info.cell_size_y
+
+        if output_crs is not None and tif_info.crs is not None:
+            try:
+                dst_crs = parse_crs(output_crs)
+                preview_bounds = transform_bounds(
+                    tif_info.crs, dst_crs, bounds[0], bounds[1], bounds[2], bounds[3]
+                )
+                preview_cell_x = (preview_bounds[2] - preview_bounds[0]) / tif_info.width
+                preview_cell_y = (preview_bounds[3] - preview_bounds[1]) / tif_info.height
+                console.print(f"[dim](Using transformed bounds for CRS {output_crs})[/dim]")
+            except Exception:
+                pass  # Fall back to original bounds
+
+        console.print(f"! Converted from {input_file.name}")
+        console.print(f"@{input_file.stem}, GRID, 5")
+        console.print(f"15, 0.1000000E+31, , 3, 1")
+        console.print(
+            f"{tif_info.height}, {tif_info.width}, "
+            f"{preview_bounds[0]:.3f}, {preview_bounds[2]:.3f}, "
+            f"{preview_bounds[1]:.3f}, {preview_bounds[3]:.3f}"
+        )
+        console.print(f"0.0, 0.0, 0.0")
+        console.print(f"@")
         console.print()
 
     except Exception as e:
@@ -241,8 +313,41 @@ def convert(
             help="Negate Z values (convert elevation to depth or vice versa)",
         ),
     ] = False,
+    output_crs: Annotated[
+        Optional[str],
+        typer.Option(
+            "--output-crs",
+            "-c",
+            help="Output CRS for coordinate transformation (e.g., 26910, EPSG:26910)",
+        ),
+    ] = None,
+    reproject_mode: Annotated[
+        str,
+        typer.Option(
+            "--reproject-mode",
+            help="Reprojection mode: 'bounds-only' (fast, default) or 'full' (resamples raster)",
+        ),
+    ] = "bounds-only",
+    resampling: Annotated[
+        str,
+        typer.Option(
+            "--resampling",
+            help="Resampling method for full mode: nearest, bilinear (default), cubic, lanczos",
+        ),
+    ] = "bilinear",
 ) -> None:
     """Convert a GeoTIFF file to ASCII format for Petrel import."""
+    # Validate reproject_mode
+    if reproject_mode not in ("bounds-only", "full"):
+        console.print(f"[red]Invalid reproject-mode: {reproject_mode}. Use 'bounds-only' or 'full'.[/red]")
+        raise typer.Exit(1)
+
+    # Validate resampling method
+    valid_resampling = ("nearest", "bilinear", "cubic", "lanczos")
+    if resampling not in valid_resampling:
+        console.print(f"[red]Invalid resampling method: {resampling}. Use one of: {', '.join(valid_resampling)}[/red]")
+        raise typer.Exit(1)
+
     # Determine output path
     if output_file is None:
         suffix_map = {
@@ -256,6 +361,11 @@ def convert(
     console.print(f"[cyan]Format:[/cyan] {format.value}")
     if flip_z:
         console.print(f"[cyan]Flip Z:[/cyan] Yes (negating Z values)")
+    if output_crs:
+        console.print(f"[cyan]Output CRS:[/cyan] {output_crs}")
+        console.print(f"[cyan]Reproject Mode:[/cyan] {reproject_mode}")
+        if reproject_mode == "full":
+            console.print(f"[cyan]Resampling:[/cyan] {resampling}")
     console.print(f"[cyan]Output:[/cyan] {output_file}")
 
     try:
@@ -268,6 +378,9 @@ def convert(
                 skip_nodata=skip_nodata,
                 decimals=decimals,
                 flip_z=flip_z,
+                output_crs=output_crs,
+                reproject_mode=reproject_mode,
+                resampling=resampling,
             )
 
         console.print("[green]✓ Conversion complete![/green]")
@@ -276,6 +389,8 @@ def convert(
         if "points_written" in stats:
             console.print(f"  Points written: {stats['points_written']:,}")
         console.print(f"  Grid size: {stats['width']} x {stats['height']} ({stats['total_cells']:,} cells)")
+        if "output_crs" in stats:
+            console.print(f"  CRS transformed: {stats['output_crs']} ({stats['reproject_mode']} mode)")
 
     except Exception as e:
         console.print(f"[red]Error during conversion: {e}[/red]")
@@ -349,8 +464,41 @@ def batch(
             help="Negate Z values (convert elevation to depth or vice versa)",
         ),
     ] = False,
+    output_crs: Annotated[
+        Optional[str],
+        typer.Option(
+            "--output-crs",
+            "-c",
+            help="Output CRS for coordinate transformation (e.g., 26910, EPSG:26910)",
+        ),
+    ] = None,
+    reproject_mode: Annotated[
+        str,
+        typer.Option(
+            "--reproject-mode",
+            help="Reprojection mode: 'bounds-only' (fast, default) or 'full' (resamples raster)",
+        ),
+    ] = "bounds-only",
+    resampling: Annotated[
+        str,
+        typer.Option(
+            "--resampling",
+            help="Resampling method for full mode: nearest, bilinear (default), cubic, lanczos",
+        ),
+    ] = "bilinear",
 ) -> None:
     """Batch convert multiple GeoTIFF files in a directory."""
+    # Validate reproject_mode
+    if reproject_mode not in ("bounds-only", "full"):
+        console.print(f"[red]Invalid reproject-mode: {reproject_mode}. Use 'bounds-only' or 'full'.[/red]")
+        raise typer.Exit(1)
+
+    # Validate resampling method
+    valid_resampling = ("nearest", "bilinear", "cubic", "lanczos")
+    if resampling not in valid_resampling:
+        console.print(f"[red]Invalid resampling method: {resampling}. Use one of: {', '.join(valid_resampling)}[/red]")
+        raise typer.Exit(1)
+
     # Set output directory
     if output_dir is None:
         output_dir = input_dir
@@ -367,6 +515,8 @@ def batch(
     console.print(f"[cyan]Found {len(input_files)} files to convert[/cyan]")
     if flip_z:
         console.print(f"[cyan]Flip Z:[/cyan] Yes (negating Z values)")
+    if output_crs:
+        console.print(f"[cyan]Output CRS:[/cyan] {output_crs} ({reproject_mode} mode)")
 
     suffix_map = {
         OutputFormat.PETREL_POINTS: ".xyz",
@@ -390,6 +540,9 @@ def batch(
                 nodata_value=nodata,
                 skip_nodata=skip_nodata,
                 decimals=decimals,
+                output_crs=output_crs,
+                reproject_mode=reproject_mode,
+                resampling=resampling,
             )
             success_count += 1
         except Exception as e:
