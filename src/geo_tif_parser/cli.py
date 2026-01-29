@@ -18,6 +18,7 @@ from .converter import (
     get_geotiff_info,
     parse_crs,
 )
+from .wells import convert_wells
 
 app = typer.Typer(
     name="geotif",
@@ -553,6 +554,122 @@ def batch(
     console.print(f"[green]✓ Converted: {success_count}[/green]")
     if error_count:
         console.print(f"[red]✗ Errors: {error_count}[/red]")
+
+
+@app.command()
+def wells(
+    input_file: Annotated[
+        Path,
+        typer.Argument(
+            help="Path to tab-delimited well data file",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ],
+    output_dir: Annotated[
+        Optional[Path],
+        typer.Option(
+            "-o",
+            "--output",
+            help="Output directory. Default: same directory as input file",
+        ),
+    ] = None,
+    source_crs: Annotated[
+        str,
+        typer.Option(
+            "--source-crs",
+            "-s",
+            help="Source EPSG code (e.g., 2927 for NAD83 / Washington South)",
+        ),
+    ] = "2927",
+    output_crs: Annotated[
+        str,
+        typer.Option(
+            "--output-crs",
+            "-c",
+            help="Output EPSG code (e.g., 32611 for WGS 84 / UTM zone 11N)",
+        ),
+    ] = "32611",
+    nodata: Annotated[
+        float,
+        typer.Option(
+            "--nodata",
+            help="NoData sentinel value in input file",
+        ),
+    ] = -9999,
+    decimals: Annotated[
+        int,
+        typer.Option(
+            "-d",
+            "--decimals",
+            help="Number of decimal places for coordinates",
+            min=0,
+            max=10,
+        ),
+    ] = 2,
+    feet_to_meters: Annotated[
+        bool,
+        typer.Option(
+            "--feet-to-meters/--no-feet-to-meters",
+            help="Convert elevation values from US survey feet to meters",
+        ),
+    ] = True,
+) -> None:
+    """Parse well data, transform coordinates, and write Petrel well header/tops files."""
+    if output_dir is None:
+        output_dir = input_file.parent
+
+    console.print(f"[cyan]Input:[/cyan] {input_file}")
+    console.print(f"[cyan]Output dir:[/cyan] {output_dir}")
+    console.print(f"[cyan]CRS:[/cyan] EPSG:{source_crs} → EPSG:{output_crs}")
+    if feet_to_meters:
+        console.print(f"[cyan]Z units:[/cyan] US survey ft → m")
+
+    try:
+        with console.status("[bold green]Processing wells..."):
+            stats = convert_wells(
+                input_path=input_file,
+                output_dir=output_dir,
+                source_crs=source_crs,
+                output_crs=output_crs,
+                nodata=nodata,
+                decimals=decimals,
+                feet_to_meters=feet_to_meters,
+            )
+
+        console.print("[green]Done.[/green]")
+
+        # Summary table
+        z_unit = "m" if feet_to_meters else "ft"
+        table = Table(title="Well Data Summary")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="green")
+
+        table.add_row("Wells", f"{stats['well_count']:,}")
+        table.add_row("Top records", f"{stats['tops_count']:,}")
+        table.add_row("X range (m)", f"{stats['x_min']:.2f} – {stats['x_max']:.2f}")
+        table.add_row("Y range (m)", f"{stats['y_min']:.2f} – {stats['y_max']:.2f}")
+        table.add_row("Z units", z_unit)
+
+        console.print(table)
+
+        # Per-surface breakdown
+        surface_counts = stats.get("surface_counts", {})
+        if surface_counts:
+            st = Table(title="Tops per Surface")
+            st.add_column("Surface", style="cyan")
+            st.add_column("Count", style="green", justify="right")
+            for name, count in sorted(surface_counts.items(), key=lambda x: -x[1]):
+                st.add_row(name, f"{count:,}")
+            console.print(st)
+
+        console.print(f"\n[dim]Headers:[/dim] {stats['headers_file']}")
+        console.print(f"[dim]Tops:[/dim]    {stats['tops_file']}")
+
+    except Exception as e:
+        console.print(f"[red]Error processing wells: {e}[/red]")
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

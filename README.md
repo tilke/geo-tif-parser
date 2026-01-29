@@ -6,7 +6,9 @@ A Python CLI tool for converting GeoTIFF raster files to ASCII formats compatibl
 
 - Convert GeoTIFF files to multiple ASCII formats
 - Batch processing of entire directories
+- **Well data parsing**: Read tab-delimited well/stratigraphic data, transform coordinates, and export Petrel-format well headers and tops
 - **CRS transformation**: Transform coordinates to a different CRS (e.g., UTM)
+- **Unit conversion**: Convert elevation values from US survey feet to meters
 - Two reprojection modes: fast bounds-only or full raster reprojection
 - Preserves coordinate reference system information
 - Configurable NoData handling
@@ -120,6 +122,28 @@ geotif batch /path/to/geotiffs/ -f petrel_grid --flip-z
 geotif batch /path/to/geotiffs/ -f petrel_grid --output-crs 26910
 ```
 
+### Parse Well Data
+
+Parse tab-delimited well/stratigraphic point data, transform coordinates, convert elevations, and write Petrel-format well header and well tops files:
+
+```bash
+# Convert well data from NAD83 Washington South (ft) to UTM 11N (m)
+geotif wells wells.txt -s 2927 -c 32611
+
+# Specify output directory
+geotif wells wells.txt -s 2927 -c 32611 -o /path/to/output/
+
+# Keep elevations in feet (no vertical unit conversion)
+geotif wells wells.txt -s 2927 -c 32611 --no-feet-to-meters
+
+# Adjust coordinate decimal precision
+geotif wells wells.txt -s 2927 -c 32611 --decimals 3
+```
+
+This produces two files:
+- **`well_headers.txt`** — tab-delimited `WELL  X  Y  ELEV` (surface elevation)
+- **`well_tops.txt`** — tab-delimited `WELL  SURFACE  ELEV  TVD` (formation top elevation and true vertical depth from surface)
+
 ### Display Detailed Header Information
 
 View detailed CRS and grid information, optionally with transformed bounds:
@@ -150,23 +174,23 @@ Space-delimited X Y Z points, one per line. This is the default format.
 
 ### Petrel Grid (`petrel_grid`)
 
-Petrel-native CPS-3 format preserving the full grid structure.
+Standard ZMAP+ ASCII grid format, importable as CPS-3 Grid Surface in Petrel.
 
 - **Extension**: `.cps3`
 - **Petrel Import**: Import directly as CPS-3 Grid Surface
 - **NoData Handling**: Replaced with 0.1E+31 (Petrel standard)
 
 ```
-FSASCI 0 1 "COMPUTED" 0 0.1E+31
-FSATTR 0 0
-FSLIMI 1313631.621 2889131.621 -353360.766 1125639.234 -2293.685 9063.338
-FSNROW 3151 2958
-FSXINC 500.000 500.000
-->Converted from surface.tif | Z: Elevation (positive up)
-2567.263  2593.142  2556.512  2654.270  2579.251
+! Converted from surface.tif | Z: Elevation (positive up)
+@surface, GRID, 5
+15, 0.1000000E+31, , 3, 1
+2958, 3151, 1313631.621, 2889131.621, -353360.766, 1125639.234
+0.0, 0.0, 0.0
+@
+   2567.263   2593.142   2556.512   2654.270   2579.251
 ```
 
-The header label indicates whether Z values represent elevation (positive up) or depth (positive down, when using `--flip-z`).
+The comment line indicates whether Z values represent elevation (positive up) or depth (positive down, when using `--flip-z`). Data is written column-major (N→S per column, columns W→E).
 
 ### ESRI ASCII Grid (`esri_ascii`)
 
@@ -184,6 +208,28 @@ yllcorner     -353360.766
 cellsize      500.000
 NODATA_value  -9999
 2567.263 2593.142 2556.512 ...
+```
+
+### Well Headers (`well_headers.txt`)
+
+Tab-delimited well location file with surface elevation.
+
+```
+WELL	X	Y	ELEV
+NWIS_1	102471.49	5049515.40	382.83
+NWIS_2	334771.85	5038653.22	592.53
+```
+
+### Well Tops (`well_tops.txt`)
+
+Tab-delimited formation top picks with elevation and true vertical depth from surface.
+
+- **TVD** = surface elevation − top elevation (depth below ground surface)
+
+```
+WELL	SURFACE	ELEV	TVD
+NWIS_3	Grande_Ronde_Basalt	588.3	0.6
+NWIS_4	Wanapum_Basalt	66.8	103.6
 ```
 
 ## CRS Transformation
@@ -275,6 +321,26 @@ Options:
   --resampling TEXT               Resampling method for full mode: nearest, bilinear, cubic, lanczos
 ```
 
+### `geotif wells`
+
+```
+Usage: geotif wells [OPTIONS] INPUT_FILE
+
+  Parse well data, transform coordinates, and write Petrel well header/tops files.
+
+Arguments:
+  INPUT_FILE                      Path to tab-delimited well data file [required]
+
+Options:
+  -o, --output PATH               Output directory (default: same as input file)
+  -s, --source-crs TEXT           Source EPSG code [default: 2927]
+  -c, --output-crs TEXT           Output EPSG code [default: 32611]
+  --nodata FLOAT                  NoData sentinel value in input file [default: -9999]
+  -d, --decimals INTEGER          Number of decimal places (0-10) [default: 2]
+  --feet-to-meters / --no-feet-to-meters
+                                  Convert elevations from US survey feet to meters [default: feet-to-meters]
+```
+
 ### `geotif batch`
 
 ```
@@ -323,6 +389,16 @@ Options:
 1. In Petrel, go to **Import** > **Surface (ESRI ASCII)**
 2. Select the `.asc` file
 3. Set the coordinate reference system
+
+### Well Headers and Tops
+
+1. In Petrel, go to **Import** > **Well Heads**
+2. Select `well_headers.txt`
+3. Map columns: WELL → Well name, X → X, Y → Y, ELEV → Elevation
+4. Set the coordinate reference system to match the output CRS
+5. Import well tops: **Import** > **Well Tops**
+6. Select `well_tops.txt`
+7. Map columns: WELL → Well name, SURFACE → Surface, TVD → TVD
 
 ## Development
 
