@@ -561,7 +561,7 @@ def wells(
     input_file: Annotated[
         Path,
         typer.Argument(
-            help="Path to tab-delimited well data file",
+            help="Path to well data file (auto-detects format)",
             exists=True,
             dir_okay=False,
             readable=True,
@@ -573,6 +573,14 @@ def wells(
             "-o",
             "--output",
             help="Output directory. Default: same directory as input file",
+        ),
+    ] = None,
+    input_format: Annotated[
+        Optional[str],
+        typer.Option(
+            "--input-format",
+            "-i",
+            help="Input format: 'columnar' (TSV one-well-per-row) or 'petrel_tops' (Petrel export). Auto-detects if not specified.",
         ),
     ] = None,
     source_crs: Annotated[
@@ -595,7 +603,7 @@ def wells(
         float,
         typer.Option(
             "--nodata",
-            help="NoData sentinel value in input file",
+            help="NoData sentinel value in input file (default: -9999 for columnar, -999 for petrel_tops)",
         ),
     ] = -9999,
     decimals: Annotated[
@@ -620,6 +628,11 @@ def wells(
     if output_dir is None:
         output_dir = input_file.parent
 
+    # Validate input format if specified
+    if input_format is not None and input_format not in ("columnar", "petrel_tops"):
+        console.print(f"[red]Invalid input format: {input_format}. Use 'columnar' or 'petrel_tops'.[/red]")
+        raise typer.Exit(1)
+
     console.print(f"[cyan]Input:[/cyan] {input_file}")
     console.print(f"[cyan]Output dir:[/cyan] {output_dir}")
     console.print(f"[cyan]CRS:[/cyan] EPSG:{source_crs} → EPSG:{output_crs}")
@@ -636,6 +649,7 @@ def wells(
                 nodata=nodata,
                 decimals=decimals,
                 feet_to_meters=feet_to_meters,
+                input_format=input_format,
             )
 
         console.print("[green]Done.[/green]")
@@ -646,6 +660,7 @@ def wells(
         table.add_column("Metric", style="cyan")
         table.add_column("Value", style="green")
 
+        table.add_row("Input format", stats.get("input_format", "columnar"))
         table.add_row("Wells", f"{stats['well_count']:,}")
         table.add_row("Top records", f"{stats['tops_count']:,}")
         table.add_row("X range (m)", f"{stats['x_min']:.2f} – {stats['x_max']:.2f}")

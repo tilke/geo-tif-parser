@@ -1,6 +1,8 @@
 """Well data parsing and Petrel well format output."""
 
 import csv
+import re
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
@@ -21,6 +23,9 @@ TOP_COLUMNS: dict[str, str] = {
     "PreM_TOP": "Pre_Miocene",
 }
 
+# Surface name for ground/KB elevation in Petrel tops export
+SURFACE_ELEVATION_NAME = "Surface"
+
 
 @dataclass
 class WellRecord:
@@ -33,8 +38,156 @@ class WellRecord:
     tops: dict[str, float] = field(default_factory=dict)
 
 
+def detect_file_format(path: Path) -> str:
+    """Detect whether file is columnar TSV or Petrel tops export format.
+
+    Args:
+        path: Path to well data file.
+
+    Returns:
+        "columnar" for tab-delimited one-well-per-row format,
+        "petrel_tops" for Petrel well tops export format.
+    """
+    with open(path) as f:
+        first_line = f.readline()
+        if first_line.startswith("# Petrel well tops"):
+            return "petrel_tops"
+        # Check for VERSION header
+        for line in [first_line] + [f.readline() for _ in range(5)]:
+            if line.strip().startswith("VERSION"):
+                return "petrel_tops"
+    return "columnar"
+
+
+def _parse_petrel_tops_line(line: str, header_cols: list[str]) -> dict[str, str]:
+    """Parse a Petrel tops data line with mixed quoted/unquoted fields.
+
+    Args:
+        line: Data line to parse.
+        header_cols: List of column names from header.
+
+    Returns:
+        Dictionary mapping column names to values.
+    """
+    # Use shlex to handle quoted strings
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        # Fallback: simple whitespace split
+        tokens = line.split()
+
+    result = {}
+    for i, col in enumerate(header_cols):
+        if i < len(tokens):
+            result[col] = tokens[i]
+        else:
+            result[col] = ""
+    return result
+
+
+def read_petrel_tops(path: Path, nodata: float = -999) -> list[WellRecord]:
+    """Read Petrel well tops export file (VERSION 2).
+
+    Format: One row per well top, with X, Y, Z, Surface, Well columns.
+    Groups rows by Well name to build WellRecord objects.
+
+    Args:
+        path: Path to Petrel tops export file.
+        nodata: Value indicating missing data (default: -999).
+
+    Returns:
+        List of WellRecord objects.
+    """
+    # Accumulator: well_name -> {x, y, surface_elev, tops}
+    well_data: dict[str, dict] = {}
+
+    with open(path) as f:
+        header_cols: list[str] = []
+        in_header = False
+
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Skip comment lines at start
+            if line.startswith("#"):
+                continue
+
+            # Skip VERSION line
+            if line.startswith("VERSION"):
+                continue
+
+            # Header section
+            if line == "BEGIN HEADER":
+                in_header = True
+                continue
+            if line == "END HEADER":
+                in_header = False
+                continue
+            if in_header:
+                header_cols.append(line)
+                continue
+
+            # Data line
+            if not header_cols:
+                continue
+
+            row = _parse_petrel_tops_line(line, header_cols)
+
+            # Extract key fields
+            try:
+                x = float(row.get("X", ""))
+                y = float(row.get("Y", ""))
+                z = float(row.get("Z", ""))
+            except ValueError:
+                continue
+
+            well_name = row.get("Well", "").strip()
+            surface_name = row.get("Surface", "").strip()
+
+            if not well_name:
+                continue
+
+            # Skip nodata values
+            if z == nodata:
+                continue
+
+            # Initialize well entry
+            if well_name not in well_data:
+                well_data[well_name] = {
+                    "x": x,
+                    "y": y,
+                    "surface_elev": None,
+                    "tops": {},
+                }
+
+            # Determine if this is surface elevation or a formation top
+            if surface_name == SURFACE_ELEVATION_NAME:
+                well_data[well_name]["surface_elev"] = z
+            else:
+                # Normalize surface name (replace spaces with underscores)
+                normalized_name = surface_name.replace(" ", "_")
+                well_data[well_name]["tops"][normalized_name] = z
+
+    # Convert to WellRecord list
+    wells: list[WellRecord] = []
+    for name, data in well_data.items():
+        wells.append(
+            WellRecord(
+                name=name.replace(" ", "_"),  # Normalize well name too
+                x=data["x"],
+                y=data["y"],
+                surface_elevation=data["surface_elev"],
+                tops=data["tops"],
+            )
+        )
+
+    return wells
+
+
 def read_well_data(path: Path, nodata: float = -9999) -> list[WellRecord]:
-    """Read tab-delimited well data file.
+    """Read tab-delimited well data file (columnar format).
 
     Expects columns: SEQ_NUM, SOURCE, SOURCE_ID, X, Y, SURF_ELEV,
     plus formation top columns matching TOP_COLUMNS keys.
@@ -194,22 +347,33 @@ def convert_wells(
     nodata: float = -9999,
     decimals: int = 2,
     feet_to_meters: bool = True,
+    input_format: str | None = None,
 ) -> dict:
     """Read well data, transform coordinates, and write Petrel output files.
 
     Args:
-        input_path: Path to tab-delimited well data file.
+        input_path: Path to well data file.
         output_dir: Directory for output files.
         source_crs: Source EPSG code (default: 2927 = NAD83 / Washington South).
         output_crs: Output EPSG code (default: 32611 = WGS 84 / UTM zone 11N).
-        nodata: Nodata sentinel value (default: -9999).
+        nodata: Nodata sentinel value (default: -9999 for columnar, -999 for petrel_tops).
         decimals: Decimal places for coordinates.
         feet_to_meters: Convert elevation values from US survey feet to meters.
+        input_format: "columnar", "petrel_tops", or None to auto-detect.
 
     Returns:
         Dictionary with conversion statistics.
     """
-    wells = read_well_data(input_path, nodata=nodata)
+    # Auto-detect format if not specified
+    if input_format is None:
+        input_format = detect_file_format(input_path)
+
+    if input_format == "petrel_tops":
+        # Petrel tops export typically uses -999 as nodata
+        petrel_nodata = nodata if nodata != -9999 else -999
+        wells = read_petrel_tops(input_path, nodata=petrel_nodata)
+    else:
+        wells = read_well_data(input_path, nodata=nodata)
 
     transform_wells(wells, source_crs, output_crs)
 
@@ -240,6 +404,7 @@ def convert_wells(
 
     return {
         "input_file": str(input_path),
+        "input_format": input_format,
         "headers_file": str(headers_path),
         "tops_file": str(tops_path),
         "well_count": well_count,
